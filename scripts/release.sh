@@ -62,6 +62,7 @@ echo ">> Building release notes"
 NOTES=$(mktemp)
 trap 'rm -f "$NOTES"' EXIT
 
+export MANIFEST SUMMARY REPO PREV_TAG
 python3 - <<PY > "$NOTES"
 import json, os, sys
 manifest = json.load(open(os.environ["MANIFEST"]))
