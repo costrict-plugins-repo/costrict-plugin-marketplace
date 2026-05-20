@@ -1,0 +1,18 @@
+.env
+.env.*
+!.env.example
+
+# build artifacts
+build/
+dist/
+*.tar.gz
+*.tar.gz.sha256
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
