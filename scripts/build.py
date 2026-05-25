@@ -359,11 +359,6 @@ def create_bare_repo(plugin_dir: Path, plugin_id: str, version: str, ctx: BuildC
     if bare.exists():
         shutil.rmtree(bare)
     bare.parent.mkdir(parents=True, exist_ok=True)
-    work = ctx.bundle_root / "_tmp_commit" / plugin_id
-    if work.exists():
-        shutil.rmtree(work)
-    work.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(plugin_dir, work)
     env = os.environ.copy()
     env.update(
         {
@@ -375,8 +370,8 @@ def create_bare_repo(plugin_dir: Path, plugin_id: str, version: str, ctx: BuildC
             "GIT_COMMITTER_DATE": ctx.build_date_iso,
         }
     )
-    run(["git", "init", "-b", "main", "--quiet"], cwd=work, env=env)
-    run(["git", "add", "-A"], cwd=work, env=env)
+    run(["git", "init", "-b", "main", "--quiet"], cwd=plugin_dir, env=env)
+    run(["git", "add", "-A"], cwd=plugin_dir, env=env)
     run(
         [
             "git",
@@ -385,13 +380,12 @@ def create_bare_repo(plugin_dir: Path, plugin_id: str, version: str, ctx: BuildC
             "-m",
             f"costrict-plugin-marketplace bundle v{version}",
         ],
-        cwd=work,
+        cwd=plugin_dir,
         env=env,
     )
-    run(["git", "clone", "--bare", "--quiet", str(work), str(bare)], env=env)
+    run(["git", "clone", "--bare", "--quiet", str(plugin_dir), str(bare)], env=env)
     # set HEAD symbolic ref to main
     run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=bare)
-    shutil.rmtree(work)
     return bare
 
 
