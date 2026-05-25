@@ -2,7 +2,9 @@
 
 [English](./for-maintainers.md) · **简体中文**
 
-本文是给负责出 bundle 的人看的 SOP。v0.x 阶段 pipeline 是有意手动的 —— 没有定时 CI，每次 release 都是人工触发。
+本文是给负责出 bundle 的人看的 SOP。
+
+公共 mirror 必须使用和 `costrict-web` ingest 完全相同的上游 `catalog-bundle.tar.gz` 构件构建。交接契约是 `catalog_bundle_url + bundle_sha + index_sha`；构建时会同时校验 bundle 本身和内部 `index.json` 的 SHA，不匹配就直接失败。这样可以避免 web 已经展示 / 收藏某个 plugin，但 `costrict-plugins` mirror 还没有发布它。
 
 ## 一次性环境配置
 
@@ -18,22 +20,65 @@ $EDITOR .env   # 填 GITHUB_TOKEN, COSTRICT_SKILLS_REPO_PATH, GITHUB_ORG
 gh auth login
 gh auth status
 
-# 检查 catalog 可达
+# 手动 / debug 构建时检查本地 catalog 可达
 ls "$COSTRICT_SKILLS_REPO_PATH/catalog/plugins/index.json"
 ```
 
 PAT 需要的 scope：
 - `repo`（创建 + 推送到 `costrict-plugins-repo` 下的 plugin mirror）
-- `workflow`（仅当未来加 CI 时需要）
+- `workflow`（触发 publish workflow）
 
-## 出新 release
+如果 `catalog_bundle_url` 指向私有 GitHub URL，workflow 会用 `MARKETPLACE_GITHUB_TOKEN` 作为 `CATALOG_DOWNLOAD_TOKEN` 下载 catalog bundle。
+
+## 推荐的 CI 发版路径
+
+上游 catalog release workflow 产出 catalog 构件后，应通过 `workflow_call` 调用 `.github/workflows/publish-marketplace.yml`。紧急 / 手动场景下，也可以用同一个 workflow 和固定 catalog release 构件触发：
+
+```bash
+VERSION=0.2.0
+CATALOG_BUNDLE_URL=https://github.com/costrict-skills-repo/costrict-skills-repo/releases/download/catalog-bundle-v2026-05-21/catalog-bundle.tar.gz
+BUNDLE_SHA=<sha256-of-catalog-bundle-tar-gz>
+INDEX_SHA=<sha256-of-index-json-inside-bundle>
+
+gh workflow run publish-marketplace.yml \
+  --repo costrict-plugins-repo/costrict-plugin-marketplace \
+  -f catalog_bundle_url="$CATALOG_BUNDLE_URL" \
+  -f bundle_sha="$BUNDLE_SHA" \
+  -f index_sha="$INDEX_SHA" \
+  -f version="$VERSION" \
+  -f publish=true \
+  -f create_release=false
+```
+
+workflow 会：
+
+1. 下载 `catalog_bundle_url`。
+2. 用 `bundle_sha` 校验 tarball。
+3. 用 `index_sha` 校验内部 `index.json`。
+4. 构建 bundle，并在 `manifest.json` 中记录 `catalog_source`、`catalog_sha`（即 `index_sha`）和 `catalog_bundle_sha`。
+5. 用 `publish.sh --skip-existing --yes` 发布 plugin repos 和 `costrict-plugins` 的 marketplace.git。
+6. 上传 bundle 作为 workflow artifact。
+
+只有需要在同一轮切 GitHub Release asset 时，才把 `create_release=true`。
+
+公共发布不要再从一个会移动的本地 checkout 重建。使用本地 catalog 构建只适合 debug。
+
+## 手动 / debug 发版路径
 
 ```bash
 # 1. 选版本号。见下面的"版本号策略"
 VERSION=0.2.0
+CATALOG_BUNDLE_URL=https://github.com/costrict-skills-repo/costrict-skills-repo/releases/download/catalog-bundle-v2026-05-21/catalog-bundle.tar.gz
+BUNDLE_SHA=<sha256-of-catalog-bundle-tar-gz>
+INDEX_SHA=<sha256-of-index-json-inside-bundle>
 
-# 2. 本地 build bundle（不动 GitHub）
-python3 scripts/build.py --version "$VERSION" --output build
+# 2. 用固定上游 catalog 本地 build bundle（不动 GitHub）
+python3 scripts/build.py \
+  --version "$VERSION" \
+  --catalog-bundle-url "$CATALOG_BUNDLE_URL" \
+  --expected-bundle-sha "$BUNDLE_SHA" \
+  --expected-index-sha "$INDEX_SHA" \
+  --output build
 
 # 3. 看 build summary
 jq '.included_count, .failed | length, .invalid | length, .skipped_unverified' \
@@ -49,7 +94,7 @@ for id in $(jq -r '.plugins[0:5][].id' build/costrict-marketplace-bundle-v$VERSI
 done
 
 # 5. 推 bare repo 到 GitHub org（幂等、有限流、自动修空 repo）
-./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION
+./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION --skip-existing
 
 # 6. 切 GitHub Release
 scripts/release.sh "$VERSION"
@@ -104,7 +149,7 @@ kill %1 && rm -rf /tmp/git-srv /tmp/verify-mp
 用 `scripts/publish.sh`（不是 `build.py --publish` —— 那个虽然还在但维护得不勤；`publish.sh` 才有限流 + 空 repo 修复的逻辑）：
 
 ```bash
-./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION
+./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION --skip-existing
 ```
 
 关键行为：
@@ -113,6 +158,7 @@ kill %1 && rm -rf /tmp/git-srv /tmp/verify-mp
 - **幂等**：用 `--skip-existing` 跳过 GH 上已有内容的 repo。已建但空的 repo 自动检测并在同一次运行里推内容
 - **大概在 burst 138 个 create 后命中 GitHub secondary rate limit**。脚本会 sleep `120s × N`（最多 8 次重试）。如果耗尽就晚点再跑 —— `--skip-existing` 保留进度
 - **不要同时跑两个 `publish.sh` 实例** —— 都会撞 rate limit 而且延长封禁
+- **CI 使用 `--yes`** —— 本地人工执行默认保留确认提示，除非明确要自动化。
 
 ## 故障排查
 
@@ -136,4 +182,4 @@ kill %1 && rm -rf /tmp/git-srv /tmp/verify-mp
 - `capability_items` 表或任何 DB
 - `/hub` 收藏 API
 
-`/hub` 的 plugin 元数据增强是 `add-plugin-capability-type` 的范围；两者独立演进。
+这个代码边界不代表公共发布可以使用不同输入。公共发布必须使用和 web ingest 相同的固定 catalog bundle 以及内部 index SHA。

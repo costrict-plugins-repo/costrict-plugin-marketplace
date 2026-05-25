@@ -1,0 +1,153 @@
+name: Publish plugin marketplace
+
+on:
+  workflow_dispatch:
+    inputs:
+      catalog_bundle_url:
+        description: "Pinned catalog-bundle.tar.gz URL from the upstream catalog release"
+        required: true
+        type: string
+      bundle_sha:
+        description: "Expected SHA256 for catalog_bundle_url"
+        required: true
+        type: string
+      index_sha:
+        description: "Expected SHA256 for index.json inside catalog-bundle.tar.gz"
+        required: true
+        type: string
+      version:
+        description: "Bundle SemVer without leading v"
+        required: true
+        type: string
+      github_org:
+        description: "Target GitHub org for plugin mirror repos"
+        required: false
+        default: "costrict-plugins-repo"
+        type: string
+      workers:
+        description: "Parallel build workers"
+        required: false
+        default: "8"
+        type: string
+      publish:
+        description: "Push plugin repos and marketplace.git"
+        required: false
+        default: true
+        type: boolean
+      create_release:
+        description: "Create GitHub Release with the bundle"
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      catalog_bundle_url:
+        required: true
+        type: string
+      bundle_sha:
+        required: true
+        type: string
+      index_sha:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      github_org:
+        required: false
+        default: "costrict-plugins-repo"
+        type: string
+      workers:
+        required: false
+        default: "8"
+        type: string
+      publish:
+        required: false
+        default: true
+        type: boolean
+      create_release:
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      MARKETPLACE_GITHUB_TOKEN:
+        required: true
+
+concurrency:
+  group: plugin-marketplace-${{ inputs.index_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.MARKETPLACE_GITHUB_TOKEN }}
+      CATALOG_DOWNLOAD_TOKEN: ${{ secrets.MARKETPLACE_GITHUB_TOKEN }}
+      VERSION: ${{ inputs.version }}
+      CATALOG_BUNDLE_URL: ${{ inputs.catalog_bundle_url }}
+      BUNDLE_SHA: ${{ inputs.bundle_sha }}
+      INDEX_SHA: ${{ inputs.index_sha }}
+      GITHUB_ORG: ${{ inputs.github_org }}
+      WORKERS: ${{ inputs.workers }}
+      BUNDLE_DIR: build/costrict-marketplace-bundle-v${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: costrict-plugins-repo/costrict-plugin-marketplace
+          token: ${{ secrets.MARKETPLACE_GITHUB_TOKEN }}
+
+      - name: Build pinned bundle
+        run: |
+          python3 scripts/build.py \
+            --version "$VERSION" \
+            --catalog-bundle-url "$CATALOG_BUNDLE_URL" \
+            --expected-bundle-sha "$BUNDLE_SHA" \
+            --expected-index-sha "$INDEX_SHA" \
+            --github-org "$GITHUB_ORG" \
+            --workers "$WORKERS" \
+            --output build
+
+      - name: Verify manifest is pinned to requested catalog bundle
+        run: |
+          python3 - <<'PY'
+          import json, os
+          manifest_path = os.path.join(os.environ["BUNDLE_DIR"], "manifest.json")
+          manifest = json.load(open(manifest_path))
+          expected_index_sha = os.environ["INDEX_SHA"].lower().removeprefix("sha256:").split()[0]
+          expected_bundle_sha = os.environ["BUNDLE_SHA"].lower().removeprefix("sha256:").split()[0]
+          if manifest["catalog_sha"] != expected_index_sha:
+              raise SystemExit(f"catalog_sha mismatch in manifest: {manifest['catalog_sha']}")
+          if manifest.get("catalog_bundle_sha") != expected_bundle_sha:
+              raise SystemExit(f"catalog_bundle_sha mismatch in manifest: {manifest.get('catalog_bundle_sha')}")
+          if manifest["catalog_source"] != os.environ["CATALOG_BUNDLE_URL"]:
+              raise SystemExit(f"catalog_source mismatch in manifest: {manifest['catalog_source']}")
+          if manifest["plugin_count"] <= 0:
+              raise SystemExit("plugin_count must be positive")
+          print(f"catalog_sha={manifest['catalog_sha']} catalog_bundle_sha={manifest['catalog_bundle_sha']} plugin_count={manifest['plugin_count']}")
+          PY
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: costrict-marketplace-bundle-v${{ inputs.version }}
+          path: |
+            build/costrict-marketplace-bundle-v${{ inputs.version }}
+            build/costrict-marketplace-bundle-v${{ inputs.version }}.tar.gz
+
+      - name: Configure GitHub credentials for git push
+        if: ${{ inputs.publish }}
+        run: |
+          gh auth status
+          gh auth setup-git
+
+      - name: Publish plugin repos and marketplace index
+        if: ${{ inputs.publish }}
+        run: |
+          ./scripts/publish.sh "$BUNDLE_DIR" \
+            --org "$GITHUB_ORG" \
+            --skip-existing \
+            --yes
+
+      - name: Create bundle release
+        if: ${{ inputs.create_release }}
+        run: scripts/release.sh "$VERSION"

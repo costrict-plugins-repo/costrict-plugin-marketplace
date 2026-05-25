@@ -7,6 +7,7 @@
 #   ./scripts/publish.sh <bundle-dir> --limit 5             # only first 5 plugins
 #   ./scripts/publish.sh <bundle-dir> --dry-run             # print actions only
 #   ./scripts/publish.sh <bundle-dir> --org other-org       # publish elsewhere
+#   ./scripts/publish.sh <bundle-dir> --yes                 # non-interactive publish for CI
 #
 # Differs from bundle-assets/import.sh in two ways:
 #   1. We call `gh repo create` first (GitHub doesn't auto-create on push)
@@ -31,6 +32,7 @@ Options:
   --parallel N           Plugin push concurrency. Default: 4 (respects GH secondary rate limits).
   --skip-marketplace     Don't render+push marketplace.git (only push plugin bare repos).
   --skip-existing        Skip plugins whose repo already exists with matching HEAD (faster reruns).
+  --yes                  Do not prompt before publishing. Intended for CI.
   --dry-run              Print intended gh/git commands without executing.
   -h, --help             Show this message.
 
@@ -53,6 +55,7 @@ PARALLEL=4
 SKIP_MP=0
 SKIP_EXISTING=0
 DRY_RUN=0
+YES=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -62,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --parallel) PARALLEL="$2"; shift 2 ;;
     --skip-marketplace) SKIP_MP=1; shift ;;
     --skip-existing) SKIP_EXISTING=1; shift ;;
+    --yes) YES=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --) shift; break ;;
     -*) echo "ERROR: unknown flag $1" >&2; usage; exit 2 ;;
@@ -97,7 +101,7 @@ fi
 TOTAL=${#REPOS[@]}
 echo ">> Plugin bare repos: $TOTAL  (org=$ORG  parallel=$PARALLEL$( ((DRY_RUN)) && echo "  DRY-RUN"))"
 
-if (( ! DRY_RUN )); then
+if (( ! DRY_RUN && ! YES )); then
   echo
   read -r -p "Proceed with publishing $TOTAL plugin repo(s) to https://github.com/$ORG/ ? [y/N] " confirm
   [[ "$confirm" == "y" || "$confirm" == "Y" ]] || { echo "Aborted."; exit 0; }

@@ -2,7 +2,9 @@
 
 **English** · [简体中文](./for-maintainers.zh-CN.md)
 
-This is the standard operating procedure for whoever builds and publishes new bundles. The pipeline is intentionally manual in v0.x — there is no scheduled CI; every release is a deliberate human action.
+This is the standard operating procedure for whoever builds and publishes new bundles.
+
+The public mirror must be built from the exact same upstream `catalog-bundle.tar.gz` artifact that `costrict-web` ingests. The hand-off contract is `catalog_bundle_url + bundle_sha + index_sha`; the build refuses to continue if either SHA does not match. This prevents web from exposing plugins that the `costrict-plugins` mirror has not published yet.
 
 ## One-time setup
 
@@ -18,22 +20,65 @@ $EDITOR .env   # fill GITHUB_TOKEN, COSTRICT_SKILLS_REPO_PATH, GITHUB_ORG
 gh auth login
 gh auth status
 
-# Sanity-check that the catalog is reachable.
+# Sanity-check that a local catalog is reachable for manual/debug builds.
 ls "$COSTRICT_SKILLS_REPO_PATH/catalog/plugins/index.json"
 ```
 
 The PAT needs scopes:
 - `repo` (create + push to plugin mirrors under `costrict-plugins-repo`)
-- `workflow` (only if/when CI is added later)
+- `workflow` (triggering the publish workflow)
 
-## Building a release
+If `catalog_bundle_url` points at a private GitHub URL, the workflow uses `MARKETPLACE_GITHUB_TOKEN` as `CATALOG_DOWNLOAD_TOKEN` for the download step.
+
+## Preferred CI release path
+
+The upstream catalog release workflow should call `.github/workflows/publish-marketplace.yml` via `workflow_call` after it has produced the catalog artifact. For an emergency/manual run, trigger the same workflow with the pinned catalog release artifact:
+
+```bash
+VERSION=0.2.0
+CATALOG_BUNDLE_URL=https://github.com/costrict-skills-repo/costrict-skills-repo/releases/download/catalog-bundle-v2026-05-21/catalog-bundle.tar.gz
+BUNDLE_SHA=<sha256-of-catalog-bundle-tar-gz>
+INDEX_SHA=<sha256-of-index-json-inside-bundle>
+
+gh workflow run publish-marketplace.yml \
+  --repo costrict-plugins-repo/costrict-plugin-marketplace \
+  -f catalog_bundle_url="$CATALOG_BUNDLE_URL" \
+  -f bundle_sha="$BUNDLE_SHA" \
+  -f index_sha="$INDEX_SHA" \
+  -f version="$VERSION" \
+  -f publish=true \
+  -f create_release=false
+```
+
+The workflow:
+
+1. Downloads `catalog_bundle_url`.
+2. Verifies the tarball against `bundle_sha`.
+3. Verifies the embedded `index.json` against `index_sha`.
+4. Builds a bundle whose `manifest.json` records `catalog_source`, `catalog_sha` (`index_sha`), and `catalog_bundle_sha`.
+5. Publishes plugin repos and `costrict-plugins` marketplace.git with `publish.sh --skip-existing --yes`.
+6. Uploads the bundle as a workflow artifact.
+
+Use `create_release=true` only when you also want the GitHub Release asset cut in the same run.
+
+Do not rebuild from a moving local checkout for public publishing. Local catalog builds are for debugging only.
+
+## Manual/debug release path
 
 ```bash
 # 1. Pick a version. See "Version bumping" below.
 VERSION=0.2.0
+CATALOG_BUNDLE_URL=https://github.com/costrict-skills-repo/costrict-skills-repo/releases/download/catalog-bundle-v2026-05-21/catalog-bundle.tar.gz
+BUNDLE_SHA=<sha256-of-catalog-bundle-tar-gz>
+INDEX_SHA=<sha256-of-index-json-inside-bundle>
 
-# 2. Build the bundle locally (no GitHub side-effects).
-python3 scripts/build.py --version "$VERSION" --output build
+# 2. Build the bundle locally from the pinned upstream catalog (no GitHub side-effects).
+python3 scripts/build.py \
+  --version "$VERSION" \
+  --catalog-bundle-url "$CATALOG_BUNDLE_URL" \
+  --expected-bundle-sha "$BUNDLE_SHA" \
+  --expected-index-sha "$INDEX_SHA" \
+  --output build
 
 # 3. Inspect the build summary.
 jq '.included_count, .failed | length, .invalid | length, .skipped_unverified' \
@@ -49,7 +94,7 @@ for id in $(jq -r '.plugins[0:5][].id' build/costrict-marketplace-bundle-v$VERSI
 done
 
 # 5. Push the bare repos to the GitHub org (idempotent, throttled, retries empty repos).
-./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION
+./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION --skip-existing
 
 # 6. Cut the GitHub Release.
 scripts/release.sh "$VERSION"
@@ -104,7 +149,7 @@ We never overwrite or delete a published release. If a release is broken, mark i
 Use `scripts/publish.sh` (not `build.py --publish` — that exists but is unmaintained; `publish.sh` has the throttling + empty-repo repair logic):
 
 ```bash
-./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION
+./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION --skip-existing
 ```
 
 Key behaviors:
@@ -113,6 +158,7 @@ Key behaviors:
 - **Idempotent**: re-running with `--skip-existing` skips repos already on GitHub with content. Empty-but-created repos are auto-detected and pushed in the same run.
 - **Hits the GitHub secondary rate limit at ~138 burst creates.** When it does, the script sleeps 120s × N (up to 8 retries). If those exhaust, just rerun later — `--skip-existing` keeps progress.
 - **Never run two `publish.sh` instances in parallel** — they'll both hit rate limits and prolong the block.
+- **CI uses `--yes`** — local humans should keep the prompt unless deliberately automating.
 
 ## Troubleshooting
 
@@ -135,4 +181,4 @@ This project is intentionally independent of `costrict-web`. It does not touch:
 - The `capability_items` table or any DB
 - The `/hub` favorite API
 
-Plugin metadata enrichment for `/hub` is the scope of `add-plugin-capability-type`; the two changes are decoupled.
+That code boundary does not mean independent public release inputs. Public publishing must use the same pinned catalog bundle and embedded index SHA as the web ingest.

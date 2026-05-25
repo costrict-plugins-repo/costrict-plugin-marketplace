@@ -99,7 +99,7 @@ costrict-plugin-marketplace/
 | Release tag | `v<semver>` |
 | Bundle filename | `costrict-marketplace-bundle-v<semver>.tar.gz` |
 
-## Independence from `costrict-web`
+## Relationship with `costrict-web`
 
 This project does **not** touch:
 
@@ -107,7 +107,7 @@ This project does **not** touch:
 - The `capability_items` table or any database
 - The `/hub` favorite API
 
-Plugin metadata enrichment for `/hub` is a separate effort (`add-plugin-capability-type` change). The two are decoupled and ship on independent schedules.
+The codebases stay separate, but public publishing is coordinated by the pinned upstream `catalog-bundle.tar.gz` and its embedded index SHA. The mirror must be built from the same upstream catalog artifact that `costrict-web` ingests so web-visible plugins are installable from `costrict-plugins`.
 
 ## License
 

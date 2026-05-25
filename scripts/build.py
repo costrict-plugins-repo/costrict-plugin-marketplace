@@ -29,7 +29,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from typing import Iterable
+from urllib.request import Request, urlopen
 
 LOG = logging.getLogger("build")
 
@@ -75,7 +77,9 @@ MEDIA_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".mp4", ".mov", ".webm", ".m4v"}
 @dataclass
 class BuildContext:
     catalog_path: Path
+    catalog_source: str
     catalog_sha: str
+    catalog_bundle_sha: str | None
     output_dir: Path
     bundle_root: Path
     cache_dir: Path
@@ -105,8 +109,84 @@ def load_catalog(catalog_path: Path) -> list[dict]:
     return json.loads(catalog_path.read_text())
 
 
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def catalog_sha(catalog_path: Path) -> str:
     return hashlib.sha256(catalog_path.read_bytes()).hexdigest()
+
+
+def normalize_sha(value: str) -> str:
+    value = value.strip().lower()
+    if value.startswith("sha256:"):
+        value = value[len("sha256:") :]
+    return value.split()[0] if value else ""
+
+
+def download_file(url: str, output_dir: Path, filename: str) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dest = output_dir / filename
+    headers = {"User-Agent": "costrict-plugin-marketplace-build"}
+    token = os.environ.get("CATALOG_DOWNLOAD_TOKEN") or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token and url.startswith(("https://github.com/", "https://api.github.com/", "https://raw.githubusercontent.com/")):
+        headers["Authorization"] = f"Bearer {token}"
+        headers["Accept"] = "application/octet-stream"
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=120) as response:
+        dest.write_bytes(response.read())
+    return dest
+
+
+def download_catalog(catalog_url: str, output_dir: Path) -> Path:
+    return download_file(catalog_url, output_dir, "plugins-index.json")
+
+
+def _safe_tar_members(bundle_path: Path) -> dict[str, tarfile.TarInfo]:
+    with tarfile.open(bundle_path, "r:*") as tar:
+        return {m.name: m for m in tar.getmembers() if m.isfile() and not Path(m.name).is_absolute() and ".." not in Path(m.name).parts}
+
+
+def _read_tar_member(bundle_path: Path, member_name: str) -> bytes:
+    with tarfile.open(bundle_path, "r:*") as tar:
+        extracted = tar.extractfile(member_name)
+        if extracted is None:
+            raise ValueError(f"catalog bundle member is not readable: {member_name}")
+        return extracted.read()
+
+
+def _pick_catalog_bundle_members(members: dict[str, tarfile.TarInfo]) -> tuple[str, str]:
+    def parts(name: str) -> tuple[str, ...]:
+        return tuple(Path(name).parts)
+
+    manifest_candidates = [name for name in members if parts(name)[-1:] == ("manifest.json",) and len(parts(name)) <= 2]
+    if not manifest_candidates:
+        raise ValueError("catalog bundle missing manifest.json")
+    manifest_name = sorted(manifest_candidates, key=lambda n: (len(parts(n)), n))[0]
+    prefix = Path(manifest_name).parent
+    index_name = str(prefix / "index.json") if str(prefix) != "." else "index.json"
+    if index_name not in members:
+        index_candidates = [name for name in members if parts(name)[-1:] == ("index.json",) and len(parts(name)) <= 2]
+        if not index_candidates:
+            raise ValueError("catalog bundle missing index.json")
+        index_name = sorted(index_candidates, key=lambda n: (len(parts(n)), n))[0]
+    return manifest_name, index_name
+
+
+def load_catalog_bundle(bundle_path: Path) -> tuple[list[dict], str, dict[str, Any], int]:
+    members = _safe_tar_members(bundle_path)
+    manifest_name, index_name = _pick_catalog_bundle_members(members)
+    manifest = json.loads(_read_tar_member(bundle_path, manifest_name))
+    index_bytes = _read_tar_member(bundle_path, index_name)
+    actual_index_sha = sha256_bytes(index_bytes)
+    declared_index_sha = normalize_sha(str(manifest.get("index_sha256", "")))
+    if declared_index_sha and declared_index_sha != actual_index_sha:
+        raise ValueError(f"catalog bundle index_sha256 mismatch: manifest={declared_index_sha} actual={actual_index_sha}")
+    entries = json.loads(index_bytes)
+    if not isinstance(entries, list):
+        raise ValueError("catalog bundle index.json must be a JSON array")
+    plugins = [e for e in entries if isinstance(e, dict) and e.get("type") == "plugin"]
+    return plugins, actual_index_sha, manifest, len(entries)
 
 
 def filter_verified(entries: list[dict]) -> tuple[list[dict], int]:
@@ -413,7 +493,7 @@ def write_manifest(plugins: list[dict], ctx: BuildContext) -> Path:
     manifest = {
         "bundle_version": ctx.version,
         "built_at": ctx.build_date_iso,
-        "catalog_source": "https://github.com/costrict-skills-repo/costrict-skills-repo",
+        "catalog_source": ctx.catalog_source,
         "catalog_sha": ctx.catalog_sha,
         "marketplace_name": MARKETPLACE_NAME,
         "plugin_count": len(plugins),
@@ -427,6 +507,8 @@ def write_manifest(plugins: list[dict], ctx: BuildContext) -> Path:
             for p in sorted(plugins, key=lambda x: x["id"])
         ],
     }
+    if ctx.catalog_bundle_sha:
+        manifest["catalog_bundle_sha"] = ctx.catalog_bundle_sha
     out = ctx.bundle_root / "manifest.json"
     out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
     return out
@@ -443,12 +525,16 @@ def write_build_summary(ctx: BuildContext, source_count: int) -> Path:
     summary = {
         "version": ctx.version,
         "built_at": ctx.build_date_iso,
+        "catalog_source": ctx.catalog_source,
+        "catalog_sha": ctx.catalog_sha,
         "catalog_source_count": source_count,
         "included_count": len(ctx.included),
         "failed": ctx.failures,
         "invalid": ctx.invalid,
         "skipped_unverified": ctx.skipped_unverified,
     }
+    if ctx.catalog_bundle_sha:
+        summary["catalog_bundle_sha"] = ctx.catalog_bundle_sha
     out = ctx.bundle_root / "build-summary.json"
     out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     return out
@@ -553,7 +639,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--catalog",
         type=Path,
         default=Path(os.environ.get("COSTRICT_SKILLS_REPO_PATH", "../costrict-skills-repo")) / "catalog" / "plugins" / "index.json",
+        help="Local plugin catalog JSON for manual/debug builds.",
     )
+    p.add_argument("--catalog-url", help="Download catalog/plugins/index.json from this URL before building. Debug/backward-compatible path.")
+    p.add_argument("--catalog-bundle", type=Path, help="Local upstream catalog-bundle.tar.gz. Preferred public-release input.")
+    p.add_argument("--catalog-bundle-url", help="Download upstream catalog-bundle.tar.gz from this URL before building. Preferred public-release input.")
+    p.add_argument(
+        "--expected-catalog-sha",
+        "--catalog-sha",
+        dest="expected_catalog_sha",
+        help="Expected SHA256 of the JSON catalog file. In bundle mode, kept as an alias for --expected-index-sha.",
+    )
+    p.add_argument("--expected-bundle-sha", help="Expected SHA256 of catalog-bundle.tar.gz. The build aborts on mismatch.")
+    p.add_argument("--expected-index-sha", help="Expected SHA256 of index.json inside catalog-bundle.tar.gz.")
     p.add_argument("--output", type=Path, default=Path("build"))
     p.add_argument("--limit", type=int, default=None, help="Process only first N entries (testing).")
     p.add_argument("--github-org", default=os.environ.get("GITHUB_ORG", GITHUB_ORG_DEFAULT))
@@ -566,10 +664,77 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     configure_logging(args.verbose)
-    if not args.catalog.is_file():
-        LOG.error("catalog not found: %s", args.catalog)
+
+    if args.catalog_bundle and args.catalog_bundle_url:
+        LOG.error("use only one of --catalog-bundle or --catalog-bundle-url")
         return 2
-    entries = load_catalog(args.catalog)
+    if (args.catalog_bundle or args.catalog_bundle_url) and args.catalog_url:
+        LOG.error("use either catalog bundle input or --catalog-url, not both")
+        return 2
+
+    catalog_bundle_sha = None
+    source_count = 0
+
+    if args.catalog_bundle or args.catalog_bundle_url:
+        catalog_path = args.catalog_bundle
+        catalog_source = str(args.catalog_bundle)
+        if args.catalog_bundle_url:
+            try:
+                catalog_path = download_file(args.catalog_bundle_url, args.output / "_catalog", "catalog-bundle.tar.gz")
+            except Exception as exc:
+                LOG.error("failed to download catalog bundle: %s", exc)
+                return 2
+            catalog_source = args.catalog_bundle_url
+        if catalog_path is None or not catalog_path.is_file():
+            LOG.error("catalog bundle not found: %s", catalog_path)
+            return 2
+
+        catalog_bundle_sha = catalog_sha(catalog_path)
+        if args.expected_bundle_sha:
+            expected_bundle_sha = normalize_sha(args.expected_bundle_sha)
+            if catalog_bundle_sha != expected_bundle_sha:
+                LOG.error("catalog bundle sha mismatch: expected=%s actual=%s source=%s", expected_bundle_sha, catalog_bundle_sha, catalog_source)
+                return 2
+        try:
+            entries, actual_catalog_sha, bundle_manifest, source_count = load_catalog_bundle(catalog_path)
+        except Exception as exc:
+            LOG.error("failed to read catalog bundle: %s", exc)
+            return 2
+        expected_index_sha = normalize_sha(args.expected_index_sha or args.expected_catalog_sha or "")
+        if expected_index_sha and actual_catalog_sha != expected_index_sha:
+            LOG.error("catalog index sha mismatch: expected=%s actual=%s source=%s", expected_index_sha, actual_catalog_sha, catalog_source)
+            return 2
+        LOG.info(
+            "catalog bundle: entries=%d plugins=%d index_sha=%s generated_at=%s",
+            source_count,
+            len(entries),
+            actual_catalog_sha,
+            bundle_manifest.get("generated_at", "unknown"),
+        )
+    else:
+        catalog_path = args.catalog
+        catalog_source = str(args.catalog)
+        if args.catalog_url:
+            try:
+                catalog_path = download_catalog(args.catalog_url, args.output / "_catalog")
+            except Exception as exc:
+                LOG.error("failed to download catalog: %s", exc)
+                return 2
+            catalog_source = args.catalog_url
+
+        if not catalog_path.is_file():
+            LOG.error("catalog not found: %s", catalog_path)
+            return 2
+
+        actual_catalog_sha = catalog_sha(catalog_path)
+        if args.expected_catalog_sha:
+            expected_catalog_sha = normalize_sha(args.expected_catalog_sha)
+            if actual_catalog_sha != expected_catalog_sha:
+                LOG.error("catalog sha mismatch: expected=%s actual=%s source=%s", expected_catalog_sha, actual_catalog_sha, catalog_source)
+                return 2
+        entries = load_catalog(catalog_path)
+        source_count = len(entries)
+
     LOG.info("catalog entries: %d", len(entries))
     kept, skipped = filter_verified(entries)
     if args.limit:
@@ -577,8 +742,10 @@ def main(argv: list[str] | None = None) -> int:
         LOG.info("--limit %d applied; processing %d", args.limit, len(kept))
     today_utc_midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     ctx = BuildContext(
-        catalog_path=args.catalog,
-        catalog_sha=catalog_sha(args.catalog),
+        catalog_path=catalog_path,
+        catalog_source=catalog_source,
+        catalog_sha=actual_catalog_sha,
+        catalog_bundle_sha=catalog_bundle_sha,
         output_dir=args.output,
         bundle_root=args.output / f"costrict-marketplace-bundle-v{args.version}",
         cache_dir=args.output / ".cache" / "clones",
@@ -637,7 +804,7 @@ def main(argv: list[str] | None = None) -> int:
     write_template(generate_marketplace_template(ctx.included, ctx), ctx)
     write_manifest(ctx.included, ctx)
     write_repo_list(ctx.included, ctx)
-    write_build_summary(ctx, source_count=len(entries))
+    write_build_summary(ctx, source_count=source_count)
     copy_bundle_assets(ctx)
     # Clean up intermediate temp dirs before tar so unpacked dir is also clean.
     for tmp in ("_tmp_commit", "_tmp_work"):
@@ -649,7 +816,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.publish:
         publish_to_github(ctx.included, ctx)
-        write_build_summary(ctx, source_count=len(entries))  # refresh after publish failures
+        write_build_summary(ctx, source_count=source_count)  # refresh after publish failures
         if ctx.failures:
             LOG.error("publish completed with %d failures", len(ctx.failures))
             return 4

@@ -98,7 +98,7 @@ costrict-plugin-marketplace/
 | Release tag | `v<semver>` |
 | Bundle 文件名 | `costrict-marketplace-bundle-v<semver>.tar.gz` |
 
-## 与 `costrict-web` 解耦
+## 与 `costrict-web` 的关系
 
 本项目**不**会动：
 
@@ -106,7 +106,7 @@ costrict-plugin-marketplace/
 - `capability_items` 表或任何数据库
 - `/hub` 收藏 API
 
-`/hub` 的 plugin 元数据增强是另一条线（`add-plugin-capability-type` change），两边互不依赖。
+代码仓库仍然分离，但公共发版按固定上游 `catalog-bundle.tar.gz` 及其内部 index SHA 协同。mirror 必须使用和 `costrict-web` ingest 相同的上游 catalog 构件构建，确保 web 可见的 plugin 都能从 `costrict-plugins` 安装。
 
 ## License
 
