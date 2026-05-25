@@ -201,19 +201,23 @@ def filter_verified(entries: list[dict]) -> tuple[list[dict], int]:
     return kept, skipped
 
 
-_TREE_RE = re.compile(r"^(?P<base>https?://github\.com/[^/]+/[^/]+?)(?:\.git)?/tree/[^/]+/(?P<sub>.+)$")
+_TREE_RE = re.compile(
+    r"^(?P<base>https?://github\.com/[^/]+/[^/]+?)(?:\.git)?/tree/[^/]+(?:/(?P<sub>.*))?$"
+)
 
 
 def normalize_source_url(source_url: str) -> tuple[str, str | None]:
     """Return (clonable_url, hinted_subdir).
 
-    Handles GitHub web-UI URLs like `.../tree/main/plugins/foo` that aren't
-    clonable directly — strips the `/tree/...` suffix and returns the
-    subdirectory as a hint for find_plugin_root.
+    Handles GitHub web-UI URLs like `.../tree/main` and
+    `.../tree/main/plugins/foo` that aren't clonable directly. Root tree URLs
+    produce no subdirectory hint; nested tree URLs return the nested path as a
+    hint for find_plugin_root.
     """
     m = _TREE_RE.match(source_url)
     if m:
-        return m.group("base") + ".git", m.group("sub")
+        subdir = (m.group("sub") or "").strip("/")
+        return m.group("base") + ".git", subdir or None
     return source_url, None
 
 
