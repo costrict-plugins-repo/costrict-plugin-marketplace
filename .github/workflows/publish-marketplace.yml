@@ -143,9 +143,13 @@ jobs:
       - name: Publish plugin repos and marketplace index
         if: ${{ inputs.publish }}
         run: |
+          # No --skip-existing: force --mirror every repo so upstream content
+          # updates actually propagate. git push --mirror is a fast no-op when
+          # a repo's content is unchanged, so the cost over --skip-existing is
+          # only the no-op push attempts (cheap), while --skip-existing froze
+          # already-published repos at their first-publish content forever.
           ./scripts/publish.sh "$BUNDLE_DIR" \
             --org "$GITHUB_ORG" \
-            --skip-existing \
             --yes
 
       - name: Create bundle release
