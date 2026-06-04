@@ -1,0 +1,117 @@
+name: Release marketplace bundle
+
+# Builds the air-gapped marketplace bundle (.tar.gz of per-plugin bare repos +
+# marketplace.json.tmpl + import.sh) from the latest upstream catalog-bundle and
+# cuts a GitHub Release on THIS repo.
+#
+# Self-contained: uses the default GITHUB_TOKEN (contents:write) for self-checkout
+# + self-release + reading the public catalog-bundle. It does NOT need the
+# MARKETPLACE_GITHUB_TOKEN secret (which only exists upstream and only flows via
+# workflow_call) because it never pushes to other org repos — it only releases
+# the bundle here. Org plugin-repo publishing stays in publish-marketplace.yml /
+# the upstream release-catalog-bundle chain.
+#
+# Triggers
+# --------
+# - schedule: weekly (Mon 05:00 UTC, after upstream Weekly Sync at 03:23) → auto bundle
+# - workflow_dispatch: manual, with optional catalog_bundle_url + version overrides
+#
+# Versioning: `version` input, else auto-bump the MINOR of the highest existing
+# `v<semver>` release on this repo (v0.1.0 → v0.2.0 → ...). release.sh refuses to
+# overwrite an existing tag, so versions stay immutable.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      catalog_bundle_url:
+        description: "catalog-bundle.tar.gz URL. Blank = latest release from zgsm-ai/everything-ai-coding"
+        required: false
+        default: ""
+      version:
+        description: "Bundle SemVer without leading v. Blank = auto-bump minor from latest release"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-marketplace-bundle
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CATALOG_REPO: zgsm-ai/everything-ai-coding
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve catalog bundle (url + checksums)
+        run: |
+          set -euo pipefail
+          URL="${{ inputs.catalog_bundle_url }}"
+          if [ -z "$URL" ]; then
+            TAG="$(gh release list --repo "$CATALOG_REPO" -L 1 --json tagName --jq '.[0].tagName')"
+            [ -n "$TAG" ] || { echo "ERROR: no catalog-bundle release found on $CATALOG_REPO" >&2; exit 1; }
+            URL="https://github.com/$CATALOG_REPO/releases/download/$TAG/catalog-bundle.tar.gz"
+          fi
+          echo "Using catalog bundle: $URL"
+          curl -fsSL -o /tmp/cb.tar.gz "$URL"
+          BUNDLE_SHA="$(sha256sum /tmp/cb.tar.gz | awk '{print $1}')"
+          INDEX_SHA="$(python3 -c "import tarfile,json;print(json.loads(tarfile.open('/tmp/cb.tar.gz').extractfile('manifest.json').read())['index_sha256'])")"
+          {
+            echo "CATALOG_BUNDLE_URL=$URL"
+            echo "BUNDLE_SHA=$BUNDLE_SHA"
+            echo "INDEX_SHA=$INDEX_SHA"
+          } >> "$GITHUB_ENV"
+          echo "bundle_sha=$BUNDLE_SHA index_sha=$INDEX_SHA"
+
+      - name: Resolve version
+        run: |
+          set -euo pipefail
+          V="${{ inputs.version }}"
+          if [ -z "$V" ]; then
+            LATEST="$(gh release list --repo "$GITHUB_REPOSITORY" -L 100 --json tagName --jq '.[].tagName' \
+              | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+            LATEST="${LATEST:-0.0.0}"
+            MAJ="$(echo "$LATEST" | cut -d. -f1)"
+            MIN="$(echo "$LATEST" | cut -d. -f2)"
+            V="$MAJ.$((MIN+1)).0"
+          fi
+          echo "Resolved bundle version: $V (latest existing: ${LATEST:-n/a})"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Build bundle
+        run: |
+          set -euo pipefail
+          python3 scripts/build.py \
+            --version "$VERSION" \
+            --catalog-bundle-url "$CATALOG_BUNDLE_URL" \
+            --expected-bundle-sha "$BUNDLE_SHA" \
+            --expected-index-sha "$INDEX_SHA" \
+            --github-org costrict-plugins-repo \
+            --workers 8 \
+            --output build
+          ls -la "build/costrict-marketplace-bundle-v$VERSION.tar.gz"
+
+      - name: Cut GitHub release
+        run: scripts/release.sh "$VERSION"
+
+      - name: Summary
+        run: |
+          echo "Released costrict-marketplace-bundle v$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "From catalog bundle: $CATALOG_BUNDLE_URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/v$VERSION" >> "$GITHUB_STEP_SUMMARY"
