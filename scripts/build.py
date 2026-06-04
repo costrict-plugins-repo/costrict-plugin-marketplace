@@ -424,13 +424,21 @@ def process_plugin(entry: dict, ctx: BuildContext) -> dict | None:
         with _ctx_lock:
             ctx.invalid.append({"plugin_id": plugin_id, "reason": "no .claude-plugin/plugin.json"})
         return None
-    try:
-        prune_plugin_content(fetched)
-    except Exception as exc:
-        LOG.warning("prune failed: %s (%s)", plugin_id, exc)
-        with _ctx_lock:
-            ctx.failures.append({"plugin_id": plugin_id, "reason": f"prune: {exc}"})
-        return None
+    # Per-entry opt-out: first-party plugins set `prune_content: false` to be
+    # mirrored verbatim (only .git is stripped, by fetch_plugin_content). This
+    # preserves rules/, templates/, evaluators/, examples/, CLAUDE.md, etc. that
+    # their skills depend on. Default (field absent) keeps the size-pruning
+    # behaviour for the bulk public catalog.
+    if entry.get("prune_content") is False:
+        LOG.info("full-content mirror (prune skipped): %s", plugin_id)
+    else:
+        try:
+            prune_plugin_content(fetched)
+        except Exception as exc:
+            LOG.warning("prune failed: %s (%s)", plugin_id, exc)
+            with _ctx_lock:
+                ctx.failures.append({"plugin_id": plugin_id, "reason": f"prune: {exc}"})
+            return None
     if not validate_plugin(fetched):
         LOG.warning("post-prune validation failed: %s", plugin_id)
         with _ctx_lock:
