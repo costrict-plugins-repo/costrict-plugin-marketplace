@@ -41,37 +41,26 @@ BUILD_AUTHOR_NAME = "costrict-build"
 BUILD_AUTHOR_EMAIL = "build@costrict.local"
 MEDIA_SIZE_THRESHOLD = 500 * 1024
 
-KEEP_DIRS = {".claude-plugin", "skills", "commands", "agents", "hooks"}
-KEEP_FILES = {
-    "LICENSE",
-    "LICENSE.txt",
-    "LICENSE.md",
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
-    "README.md",
-    "README.txt",
+# Denylist pruning (see research/prune-impact-fix.md). build.py clones with
+# `--depth 1` and strips `.git`, so node_modules/dist/build/.next never enter the
+# tree unless committed — the old whitelist instead deleted FUNCTIONAL content
+# (.mcp.json, scripts/, src/, lib/, rules/, templates/, CLAUDE.md, hooks scripts).
+# We now KEEP everything except known dev/CI noise + caches, and rely on the
+# whole-tree large-media sweep for the real size savings.
+DROP_DIRS = {
+    "node_modules", "dist", "build", "out", "target", ".next", "coverage",
+    ".turbo", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".venv", "venv", ".git", ".github", ".idea", ".vscode", ".zed",
+    ".husky", ".changeset", ".cache",
 }
-PRUNE_FILES_TOP = {
-    "package.json",
-    "package-lock.json",
-    "tsconfig.json",
-    "Cargo.toml",
-    "Cargo.lock",
-    "pyproject.toml",
-    "poetry.lock",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    ".gitignore",
-    ".gitattributes",
-    ".editorconfig",
-    ".eslintrc.json",
-    ".prettierrc",
-    "tslint.json",
-    "jest.config.js",
-    "vitest.config.ts",
-    "Makefile",
+DROP_FILES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock",
+    "poetry.lock", "uv.lock", "Pipfile.lock", "composer.lock",
+    "Gemfile.lock", "go.sum", ".DS_Store",
 }
 MEDIA_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".mp4", ".mov", ".webm", ".m4v"}
+# Large non-media binaries also swept past the size threshold.
+LARGE_BIN_EXTS = {".pdf", ".zip", ".tar", ".gz", ".tgz", ".7z", ".bin", ".onnx", ".db", ".sqlite"}
 
 
 @dataclass
@@ -321,31 +310,39 @@ def fetch_plugin_content(entry: dict, work_dir: Path, ctx: BuildContext) -> Path
 
 
 def prune_plugin_content(plugin_dir: Path) -> None:
-    """Apply the retain/prune rules from the marketplace-build spec."""
+    """Denylist prune: drop only known dev/CI noise + caches, keep all runtime
+    content (.mcp.json, scripts/, src/, lib/, rules/, templates/, hooks, …),
+    then sweep large media/binaries from the whole tree.
+    """
     if not plugin_dir.exists():
         return
     for entry in list(plugin_dir.iterdir()):
         name = entry.name
         if entry.is_dir():
-            if name in KEEP_DIRS:
-                _prune_large_media(entry)
-                continue
-            shutil.rmtree(entry)
+            if name in DROP_DIRS:
+                shutil.rmtree(entry)
+            # everything else is kept verbatim
         else:
-            if name in KEEP_FILES:
-                continue
-            if name in PRUNE_FILES_TOP or entry.suffix.lower() in MEDIA_EXTS:
+            if name in DROP_FILES:
                 entry.unlink()
-                continue
-            # Conservative: remove other top-level files (build noise, scripts, etc.)
-            entry.unlink()
+            # all other top-level files are kept (.mcp.json, package.json, configs)
+    # Real size lever: drop oversized media/binaries across the entire retained
+    # tree (the old code only swept inside the 5 whitelisted dirs).
+    _prune_large_media(plugin_dir)
 
 
 def _prune_large_media(dir_: Path) -> None:
     for f in dir_.rglob("*"):
         if not f.is_file():
             continue
-        if f.suffix.lower() in MEDIA_EXTS and f.stat().st_size > MEDIA_SIZE_THRESHOLD:
+        ext = f.suffix.lower()
+        if ext not in MEDIA_EXTS and ext not in LARGE_BIN_EXTS:
+            continue
+        try:
+            too_big = f.stat().st_size > MEDIA_SIZE_THRESHOLD
+        except OSError:
+            continue
+        if too_big:
             f.unlink()
 
 
