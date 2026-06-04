@@ -84,8 +84,10 @@ jobs:
           set -euo pipefail
           V="${{ inputs.version }}"
           if [ -z "$V" ]; then
+            # `|| true`: grep exits 1 when no semver release exists yet; under
+            # pipefail that would otherwise abort the step. Empty → 0.0.0 → v0.1.0.
             LATEST="$(gh release list --repo "$GITHUB_REPOSITORY" -L 100 --json tagName --jq '.[].tagName' \
-              | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+              | sed 's/^v//' | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V | tail -1)"
             LATEST="${LATEST:-0.0.0}"
             MAJ="$(echo "$LATEST" | cut -d. -f1)"
             MIN="$(echo "$LATEST" | cut -d. -f2)"
