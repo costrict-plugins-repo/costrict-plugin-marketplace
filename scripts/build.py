@@ -191,23 +191,30 @@ def filter_verified(entries: list[dict]) -> tuple[list[dict], int]:
 
 
 _TREE_RE = re.compile(
-    r"^(?P<base>https?://github\.com/[^/]+/[^/]+?)(?:\.git)?/tree/[^/]+(?:/(?P<sub>.*))?$"
+    r"^(?P<base>https?://github\.com/[^/]+/[^/]+?)(?:\.git)?/tree/(?P<branch>[^/]+)(?:/(?P<sub>.*))?$"
 )
 
 
-def normalize_source_url(source_url: str) -> tuple[str, str | None]:
-    """Return (clonable_url, hinted_subdir).
+def normalize_source_url(source_url: str) -> tuple[str, str | None, str | None]:
+    """Return (clonable_url, hinted_subdir, branch).
 
     Handles GitHub web-UI URLs like `.../tree/main` and
     `.../tree/main/plugins/foo` that aren't clonable directly. Root tree URLs
     produce no subdirectory hint; nested tree URLs return the nested path as a
     hint for find_plugin_root.
+
+    `branch` is the ref parsed from the `/tree/<ref>/` segment so the clone can
+    target it (previously discarded → every tree URL silently cloned the default
+    branch). Only a single path segment is captured here; refs that contain a
+    slash (e.g. `feat/foo`) are ambiguous in a web URL, so callers that know the
+    ref unambiguously (from a catalog entry's `source_ref`) should pass it
+    explicitly to `cache_clone` rather than rely on this.
     """
     m = _TREE_RE.match(source_url)
     if m:
         subdir = (m.group("sub") or "").strip("/")
-        return m.group("base") + ".git", subdir or None
-    return source_url, None
+        return m.group("base") + ".git", subdir or None, m.group("branch")
+    return source_url, None, None
 
 
 _clone_locks: dict[str, threading.Lock] = {}
@@ -222,42 +229,59 @@ class CloneFailedAndCached(Exception):
     """A previously-attempted clone for this URL failed; do not retry within this run."""
 
 
-def cache_clone(source_url: str, cache_dir: Path) -> Path:
-    """Clone (or reuse) source_url under cache_dir; thread-safe per URL.
+def cache_clone(source_url: str, cache_dir: Path, branch: str | None = None) -> Path:
+    """Clone (or reuse) source_url under cache_dir; thread-safe per (url, ref).
 
-    Optimisations: failed URLs are remembered so concurrent plugins sharing
-    a bad source_url short-circuit instead of stampeding the same network call.
+    `branch` (when given) is the authoritative ref to check out — it wins over
+    any ref parsed from the URL and is the only way to clone a slash-containing
+    ref unambiguously. With no ref from either source the default branch is
+    cloned (unchanged behaviour).
+
+    Optimisations: failed (url, ref) pairs are remembered so concurrent plugins
+    sharing a bad source short-circuit instead of stampeding the same network
+    call. The cache/lock identity includes the ref so the same repo cloned at
+    two refs never collides on one cache dir.
     """
-    clone_url, _ = normalize_source_url(source_url)
+    clone_url, _, url_branch = normalize_source_url(source_url)
+    ref = branch or url_branch
+    if ref == "HEAD":  # sentinel for "default branch" (official/dev sync), not a real ref
+        ref = None
+    clone_id = clone_url if not ref else f"{clone_url}#{ref}"
     with _clone_locks_master:
-        lock = _clone_locks.setdefault(clone_url, threading.Lock())
+        lock = _clone_locks.setdefault(clone_id, threading.Lock())
     with lock:
         # short-circuit on prior failure
-        if clone_url in _clone_failures:
-            raise CloneFailedAndCached(_clone_failures[clone_url])
-        safe = re.sub(r"[^A-Za-z0-9._-]", "_", clone_url)
+        if clone_id in _clone_failures:
+            raise CloneFailedAndCached(_clone_failures[clone_id])
+        # Sanitising for the filesystem is lossy (feat/a and feat_a collapse to
+        # the same name), so append a hash of the exact clone_id to keep every
+        # (url, ref) pair in its own cache dir.
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", clone_id)[:100]
+        safe = f"{safe}__{hashlib.sha256(clone_id.encode()).hexdigest()[:12]}"
         dest = cache_dir / safe
         if dest.exists() and (dest / ".git").exists():
             return dest
         if dest.exists():
             shutil.rmtree(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        LOG.debug("clone %s", clone_url)
+        LOG.debug("clone %s%s", clone_url, f" @ {ref}" if ref else "")
+        cmd = [
+            "git",
+            "-c",
+            "http.lowSpeedLimit=1000",
+            "-c",
+            "http.lowSpeedTime=20",
+            "clone",
+            "--depth",
+            "1",
+            "--quiet",
+        ]
+        if ref:
+            cmd += ["--branch", ref]
+        cmd += [clone_url, str(dest)]
         try:
             subprocess.run(
-                [
-                    "git",
-                    "-c",
-                    "http.lowSpeedLimit=1000",
-                    "-c",
-                    "http.lowSpeedTime=20",
-                    "clone",
-                    "--depth",
-                    "1",
-                    "--quiet",
-                    clone_url,
-                    str(dest),
-                ],
+                cmd,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -265,12 +289,12 @@ def cache_clone(source_url: str, cache_dir: Path) -> Path:
             )
         except subprocess.TimeoutExpired:
             shutil.rmtree(dest, ignore_errors=True)
-            _clone_failures[clone_url] = "timeout"
+            _clone_failures[clone_id] = "timeout"
             raise CloneFailedAndCached("clone timed out") from None
         except subprocess.CalledProcessError as exc:
             shutil.rmtree(dest, ignore_errors=True)
-            _clone_failures[clone_url] = (exc.stderr or "").strip()[:200] or "git clone failed"
-            raise CloneFailedAndCached(_clone_failures[clone_url]) from None
+            _clone_failures[clone_id] = (exc.stderr or "").strip()[:200] or "git clone failed"
+            raise CloneFailedAndCached(_clone_failures[clone_id]) from None
         return dest
 
 
@@ -298,8 +322,21 @@ def fetch_plugin_content(entry: dict, work_dir: Path, ctx: BuildContext) -> Path
     plugin_name = entry.get("install", {}).get("plugin_name") or entry.get("name")
     if not source_url:
         raise ValueError("missing source_url")
-    _, subdir_hint = normalize_source_url(source_url)
-    cloned = cache_clone(source_url, ctx.cache_dir)
+    _, url_subdir, _ = normalize_source_url(source_url)
+    # Prefer the producer's unambiguous fields (set by everything-ai-coding's
+    # sync_plugins_csc.py): bundle.source_ref pins the exact ref (works for
+    # slash-containing branches the URL can't disambiguate), bundle.plugin_root
+    # the exact subdir. Fall back to whatever the URL yields for plain entries.
+    bundle = entry.get("bundle") or {}
+    # source_ref is the producer's authoritative ref. "HEAD"/"" are sentinels for
+    # "default branch" (set by the official/dev sync for the bulk of the catalog),
+    # NOT real refs — leave them as None so the clone keeps using the default
+    # branch instead of `git clone --branch HEAD` (which fails).
+    branch = bundle.get("source_ref") or entry.get("source_ref")
+    if branch in ("", "HEAD"):
+        branch = None
+    subdir_hint = bundle.get("plugin_root") or url_subdir
+    cloned = cache_clone(source_url, ctx.cache_dir, branch=branch)
     root = find_plugin_root(cloned, plugin_name, subdir_hint=subdir_hint)
     if root is None:
         return None
