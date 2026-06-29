@@ -1,0 +1,80 @@
+name: Mirror bundle to Gitea (manual)
+
+# Manual entrypoint to mirror a released marketplace bundle to the self-hosted
+# Gitea (gitea.costrict.ai/costrict-plugins-repo). Two uses:
+#   - Smoke test:  set `limit` (e.g. 30) → pre-create + push only the first N
+#     repos, to validate the mechanism before trusting a full sync.
+#   - On-demand full sync: leave `limit` blank/0 → mirror the whole bundle
+#     (same as the automatic step in release-bundle.yml, but on demand).
+#
+# Cleanly no-ops when GITEA_TOKEN secret is not set. Credentials never touch a
+# URL — see scripts/mirror-to-gitea.sh.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_version:
+        description: "Bundle SemVer without leading v (e.g. 0.8.0). Blank = latest release on this repo."
+        required: false
+        default: ""
+      limit:
+        description: "Mirror only the first N repos (smoke test). Blank/0 = full bundle."
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-gitea
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+      GITEA_USER: ${{ vars.GITEA_USER }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve & download bundle
+        run: |
+          set -euo pipefail
+          if [ -z "${GITEA_TOKEN:-}" ]; then
+            echo ">> GITEA_TOKEN not set — nothing to mirror"
+            exit 0
+          fi
+          V="${{ inputs.bundle_version }}"
+          if [ -z "$V" ]; then
+            V="$(gh release list --repo "$GITHUB_REPOSITORY" -L 100 --json tagName --jq '.[].tagName' \
+              | sed 's/^v//' | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V | tail -1)"
+            [ -n "$V" ] || { echo "ERROR: no semver bundle release found" >&2; exit 1; }
+          fi
+          echo "Mirroring bundle v$V"
+          gh release download "v$V" --repo "$GITHUB_REPOSITORY" \
+            --pattern "costrict-marketplace-bundle-v$V.tar.gz" -O /tmp/bundle.tar.gz
+          mkdir -p /tmp/bundle
+          tar xzf /tmp/bundle.tar.gz -C /tmp/bundle
+          echo "BUNDLE_DIR=/tmp/bundle/costrict-marketplace-bundle-v$V" >> "$GITHUB_ENV"
+
+      - name: Mirror to Gitea
+        run: |
+          set -euo pipefail
+          if [ -z "${GITEA_TOKEN:-}" ]; then
+            echo ">> GITEA_TOKEN not set — skipping"
+            exit 0
+          fi
+          LIM="${{ inputs.limit }}"
+          if [ -n "${LIM:-}" ] && [ "$LIM" != "0" ]; then
+            echo ">> SMOKE: mirroring first $LIM repos only"
+            bash scripts/mirror-to-gitea.sh "$BUNDLE_DIR" --limit "$LIM"
+          else
+            echo ">> FULL: mirroring entire bundle"
+            bash scripts/mirror-to-gitea.sh "$BUNDLE_DIR"
+          fi
