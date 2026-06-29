@@ -167,6 +167,15 @@ fi
 # host-scoped extraHeader in the GIT_CONFIG_GLOBAL we exported above, which
 # import.sh's child git processes inherit. We do NOT `exec`: running it as a
 # child lets the EXIT trap shred the token-bearing temp gitconfig afterward.
+# Use THIS REPO's import.sh (with --limit + HTTP guards + serial retry), not the
+# snapshot baked into a possibly-older released bundle: a downloaded v0.x bundle
+# can carry a stale import.sh that lacks --limit (older usage → exits "Usage:").
+# import.sh resolves repos/plugins relative to its own dir, so overwrite the
+# bundle copy with the repo's current one before running it.
+REPO_IMPORT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bundle-assets/import.sh"
+if [[ -f "$REPO_IMPORT" ]]; then
+  cp "$REPO_IMPORT" "$BUNDLE_DIR/import.sh"
+fi
 BASE_URL="https://$GITEA_HOST/$GITEA_OWNER"
 echo ">> handing off to import.sh to mirror to $BASE_URL"
 rc=0
