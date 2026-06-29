@@ -136,7 +136,7 @@ export -f push_one
 
 if (( TOTAL > 0 )); then
   printf '%s\0' "${REPOS[@]}" \
-    | xargs -0 -n 1 -P 8 -I {} bash -c 'push_one "$@"' _ {}
+    | xargs -0 -P 8 -I {} bash -c 'push_one "$@"' _ {}
 fi
 
 SUCC=$(wc -l < "$SUCC_FILE" | tr -d ' ')
