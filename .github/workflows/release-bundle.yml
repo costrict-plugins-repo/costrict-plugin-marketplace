@@ -44,7 +44,8 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 90m (was 45m) to cover build + full ~1564-repo Gitea mirror in one job.
+    timeout-minutes: 90
     env:
       GH_TOKEN: ${{ github.token }}
       CATALOG_REPO: zgsm-ai/everything-ai-coding
@@ -111,6 +112,24 @@ jobs:
 
       - name: Cut GitHub release
         run: scripts/release.sh "$VERSION"
+
+      # Runs AFTER "Cut GitHub release": the release is already published, so if
+      # this mirror fails the job goes red (failure stays visible) WITHOUT
+      # un-publishing the GitHub release. Re-running is safe (force-mirror is
+      # idempotent; the next weekly/manual run self-heals).
+      - name: Mirror full bundle to Gitea
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_USER: ${{ vars.GITEA_USER }}
+        run: |
+          set -euo pipefail
+          # Run-internal guard (secrets are unreliable in step-level `if:`):
+          # when GITEA_TOKEN isn't configured, skip without failing the release.
+          if [ -z "${GITEA_TOKEN:-}" ]; then
+            echo "GITEA_TOKEN not configured — skipping Gitea mirror."
+            exit 0
+          fi
+          bash scripts/mirror-to-gitea.sh "build/costrict-marketplace-bundle-v$VERSION"
 
       - name: Summary
         run: |
