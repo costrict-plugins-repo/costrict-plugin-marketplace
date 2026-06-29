@@ -173,9 +173,10 @@ fi
 # import.sh resolves repos/plugins relative to its own dir, so overwrite the
 # bundle copy with the repo's current one before running it.
 REPO_IMPORT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bundle-assets/import.sh"
-if [[ -f "$REPO_IMPORT" ]]; then
-  cp "$REPO_IMPORT" "$BUNDLE_DIR/import.sh"
-fi
+# Hard-fail rather than silently fall back to the bundle's (possibly stale,
+# pre---limit) import.sh — a missing repo copy means a broken checkout.
+[[ -f "$REPO_IMPORT" ]] || { echo "ERROR: repo import.sh not found at $REPO_IMPORT" >&2; exit 1; }
+cp "$REPO_IMPORT" "$BUNDLE_DIR/import.sh"
 BASE_URL="https://$GITEA_HOST/$GITEA_OWNER"
 echo ">> handing off to import.sh to mirror to $BASE_URL"
 rc=0
