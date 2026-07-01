@@ -110,13 +110,13 @@ python3 scripts/build.py --version <v> --workers 8 -v
 
 GitHub secondary rate limit（创建内容的）。burst 创建（短时间内 ~138+ 个 repo）会触发。
 
-**修法：** 脚本会自动退避（`120s × N`，最多 8 次）。如果耗尽：**完全停掉所有 `gh` 流量 10-15 分钟**，然后用 `--skip-existing` 重跑。**不要并行跑多个 `publish.sh`** —— 那只会延长封禁。
+**修法：** 脚本会自动退避（`120s × N`，最多 8 次）。如果耗尽：**完全停掉所有 `gh` 流量 10-15 分钟**，然后重跑；未变化的 repo 会被 tree 比较跳过。**不要并行跑多个 `publish.sh`** —— 那只会延长封禁。
 
 ### `Get "https://api.github.com/...": net/http: TLS handshake timeout`
 
 短暂网络抖动。脚本会把它计为 CREATE_FAIL 但不会在本次运行内自动重试。
 
-**修法：** 用 `--skip-existing` 重跑 `publish.sh` —— 打过 patch 的脚本会检测出"已建但空"的 repo 并补推内容（同时创建仍然缺的）。
+**修法：** 重跑 `publish.sh` —— 打过 patch 的脚本会检测出"已建但空"的 repo 并补推内容（同时创建仍然缺的），未变化的 repo 会被 tree 比较跳过。
 
 ### publish 完成后部分 repo 仍是空的
 

@@ -56,7 +56,7 @@ The workflow:
 2. Verifies the tarball against `bundle_sha`.
 3. Verifies the embedded `index.json` against `index_sha`.
 4. Builds a bundle whose `manifest.json` records `catalog_source`, `catalog_sha` (`index_sha`), and `catalog_bundle_sha`.
-5. Publishes plugin repos and `costrict-plugins` marketplace.git with `publish.sh --skip-existing --yes`.
+5. Publishes plugin repos and `costrict-plugins` marketplace.git with `publish.sh --yes`.
 6. Uploads the bundle as a workflow artifact.
 
 Use `create_release=true` only when you also want the GitHub Release asset cut in the same run.
@@ -94,7 +94,7 @@ for id in $(jq -r '.plugins[0:5][].id' build/costrict-marketplace-bundle-v$VERSI
 done
 
 # 5. Push the bare repos to the GitHub org (idempotent, throttled, retries empty repos).
-./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION --skip-existing
+./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION
 
 # 6. Cut the GitHub Release.
 scripts/release.sh "$VERSION"
@@ -149,14 +149,14 @@ We never overwrite or delete a published release. If a release is broken, mark i
 Use `scripts/publish.sh` (not `build.py --publish` — that exists but is unmaintained; `publish.sh` has the throttling + empty-repo repair logic):
 
 ```bash
-./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION --skip-existing
+./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION
 ```
 
 Key behaviors:
 
-- **Two phases**: serial repo create (with 2s gap + exponential backoff on rate limit) then parallel `git push --mirror` (4 concurrent).
-- **Idempotent**: re-running with `--skip-existing` skips repos already on GitHub with content. Empty-but-created repos are auto-detected and pushed in the same run.
-- **Hits the GitHub secondary rate limit at ~138 burst creates.** When it does, the script sleeps 120s × N (up to 8 retries). If those exhaust, just rerun later — `--skip-existing` keeps progress.
+- **Two phases**: serial repo create (with 2s gap + exponential backoff on rate limit) then parallel content-aware `main` pushes.
+- **Idempotent**: re-running compares each plugin repo's local `main` tree with the remote `main` tree; unchanged repos are skipped, changed repos are pushed. Empty-but-created repos are auto-detected and pushed in the same run.
+- **Hits the GitHub secondary rate limit at ~138 burst creates.** When it does, the script sleeps 120s × N (up to 8 retries). If those exhaust, just rerun later — already-published unchanged repos will be skipped by tree comparison.
 - **Never run two `publish.sh` instances in parallel** — they'll both hit rate limits and prolong the block.
 - **CI uses `--yes`** — local humans should keep the prompt unless deliberately automating.
 
@@ -164,9 +164,9 @@ Key behaviors:
 
 For the full catalog see [troubleshooting.md](./troubleshooting.md). Quick hits:
 
-**GitHub secondary rate limit during publish** — Re-run with `--skip-existing` after a 10–15 min cooldown.
+**GitHub secondary rate limit during publish** — Re-run after a 10–15 min cooldown; unchanged repos will be skipped by tree comparison.
 
-**Some plugins in the org are empty (no refs)** — A bug we fixed but worth knowing: kill the running `publish.sh`, re-run with `--skip-existing` — the script probes for empty repos at startup and includes them in the push set.
+**Some plugins in the org are empty (no refs)** — A bug we fixed but worth knowing: kill the running `publish.sh`, then re-run it. The script probes for empty repos at startup and includes them in the push set.
 
 **One plugin keeps failing fetch** — Its `source_url` may be 404 or moved. Check `build-summary.json::failed`. Either fix the catalog entry upstream in `costrict-skills-repo` or accept the gap until next refresh.
 

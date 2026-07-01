@@ -29,6 +29,11 @@ on:
         required: false
         default: "8"
         type: string
+      publish_parallel:
+        description: "Parallel plugin repo pushes"
+        required: false
+        default: "2"
+        type: string
       publish:
         description: "Push plugin repos and marketplace.git"
         required: false
@@ -61,6 +66,10 @@ on:
         required: false
         default: "8"
         type: string
+      publish_parallel:
+        required: false
+        default: "2"
+        type: string
       publish:
         required: false
         default: true
@@ -89,6 +98,7 @@ jobs:
       INDEX_SHA: ${{ inputs.index_sha }}
       GITHUB_ORG: ${{ inputs.github_org }}
       WORKERS: ${{ inputs.workers }}
+      PUBLISH_PARALLEL: ${{ inputs.publish_parallel }}
       BUNDLE_DIR: build/costrict-marketplace-bundle-v${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
@@ -143,13 +153,12 @@ jobs:
       - name: Publish plugin repos and marketplace index
         if: ${{ inputs.publish }}
         run: |
-          # No --skip-existing: force --mirror every repo so upstream content
-          # updates actually propagate. git push --mirror is a fast no-op when
-          # a repo's content is unchanged, so the cost over --skip-existing is
-          # only the no-op push attempts (cheap), while --skip-existing froze
-          # already-published repos at their first-publish content forever.
+          # publish.sh compares each repo's main tree before pushing, so
+          # unchanged plugin repos are skipped while upstream content updates
+          # still propagate.
           ./scripts/publish.sh "$BUNDLE_DIR" \
             --org "$GITHUB_ORG" \
+            --parallel "$PUBLISH_PARALLEL" \
             --yes
 
       - name: Create bundle release

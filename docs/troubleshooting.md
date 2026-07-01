@@ -110,13 +110,13 @@ If workers=1, you may have an old version of `build.py` without the `ThreadPoolE
 
 GitHub's secondary rate limit for content creation. Triggered by burst creation (~138+ repos in a few minutes).
 
-**Fix:** The script auto-backs off (`120s × N` retries, max 8). If it gives up: stop all `gh` traffic for 10-15 minutes, then re-run with `--skip-existing`. Avoid running multiple `publish.sh` instances in parallel — that *prolongs* the rate limit.
+**Fix:** The script auto-backs off (`120s × N` retries, max 8). If it gives up: stop all `gh` traffic for 10-15 minutes, then re-run; unchanged repos will be skipped by tree comparison. Avoid running multiple `publish.sh` instances in parallel — that *prolongs* the rate limit.
 
 ### `Get "https://api.github.com/...": net/http: TLS handshake timeout`
 
 Transient network blip. The script counts these as CREATE_FAILs but doesn't auto-retry within the same run.
 
-**Fix:** Re-run `publish.sh` with `--skip-existing` — the patched script detects empty-but-created repos and pushes content to them (in addition to creating the still-missing ones).
+**Fix:** Re-run `publish.sh` — the patched script detects empty-but-created repos and pushes content to them (in addition to creating the still-missing ones), while unchanged repos are skipped by tree comparison.
 
 ### After publish, some repos exist but are empty
 

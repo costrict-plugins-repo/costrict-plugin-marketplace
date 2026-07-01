@@ -56,7 +56,7 @@ workflow 会：
 2. 用 `bundle_sha` 校验 tarball。
 3. 用 `index_sha` 校验内部 `index.json`。
 4. 构建 bundle，并在 `manifest.json` 中记录 `catalog_source`、`catalog_sha`（即 `index_sha`）和 `catalog_bundle_sha`。
-5. 用 `publish.sh --skip-existing --yes` 发布 plugin repos 和 `costrict-plugins` 的 marketplace.git。
+5. 用 `publish.sh --yes` 发布 plugin repos 和 `costrict-plugins` 的 marketplace.git。
 6. 上传 bundle 作为 workflow artifact。
 
 只有需要在同一轮切 GitHub Release asset 时，才把 `create_release=true`。
@@ -94,7 +94,7 @@ for id in $(jq -r '.plugins[0:5][].id' build/costrict-marketplace-bundle-v$VERSI
 done
 
 # 5. 推 bare repo 到 GitHub org（幂等、有限流、自动修空 repo）
-./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION --skip-existing
+./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION
 
 # 6. 切 GitHub Release
 scripts/release.sh "$VERSION"
@@ -149,14 +149,14 @@ kill %1 && rm -rf /tmp/git-srv /tmp/verify-mp
 用 `scripts/publish.sh`（不是 `build.py --publish` —— 那个虽然还在但维护得不勤；`publish.sh` 才有限流 + 空 repo 修复的逻辑）：
 
 ```bash
-./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION --skip-existing
+./scripts/publish.sh build/costrict-marketplace-bundle-v$VERSION
 ```
 
 关键行为：
 
-- **两阶段**：Phase 1 串行 create（2s 间隔 + rate-limit 退避），Phase 2 并行 `git push --mirror`（4 并发）
-- **幂等**：用 `--skip-existing` 跳过 GH 上已有内容的 repo。已建但空的 repo 自动检测并在同一次运行里推内容
-- **大概在 burst 138 个 create 后命中 GitHub secondary rate limit**。脚本会 sleep `120s × N`（最多 8 次重试）。如果耗尽就晚点再跑 —— `--skip-existing` 保留进度
+- **两阶段**：Phase 1 串行 create（2s 间隔 + rate-limit 退避），Phase 2 并行做内容感知的 `main` 推送
+- **幂等**：重跑时比较每个 plugin repo 的本地 `main` tree 和远端 `main` tree；未变化的 repo 会跳过，有变化的 repo 会推送。已建但空的 repo 自动检测并在同一次运行里推内容
+- **大概在 burst 138 个 create 后命中 GitHub secondary rate limit**。脚本会 sleep `120s × N`（最多 8 次重试）。如果耗尽就晚点再跑 —— 已发布且未变化的 repo 会被 tree 比较跳过
 - **不要同时跑两个 `publish.sh` 实例** —— 都会撞 rate limit 而且延长封禁
 - **CI 使用 `--yes`** —— 本地人工执行默认保留确认提示，除非明确要自动化。
 
@@ -164,9 +164,9 @@ kill %1 && rm -rf /tmp/git-srv /tmp/verify-mp
 
 完整目录见 [troubleshooting.zh-CN.md](./troubleshooting.zh-CN.md)。常见几个：
 
-**publish 时撞 GitHub secondary rate limit** —— 静等 10-15 min 后用 `--skip-existing` 重跑
+**publish 时撞 GitHub secondary rate limit** —— 静等 10-15 min 后重跑；未变化的 repo 会被 tree 比较跳过
 
-**org 里有些 plugin repo 是空的（无 refs）** —— 我们曾有过这个 bug 但已修：kill 当前 `publish.sh`，用 `--skip-existing` 重跑 —— 脚本启动时会探测空 repo 并把它们纳入 push 集合
+**org 里有些 plugin repo 是空的（无 refs）** —— 我们曾有过这个 bug 但已修：kill 当前 `publish.sh` 后重跑。脚本启动时会探测空 repo 并把它们纳入 push 集合
 
 **某个 plugin 一直 fetch 失败** —— 它的 `source_url` 可能 404 或搬家。看 `build-summary.json::failed`。要么去上游 `costrict-skills-repo` 修 catalog 条目，要么接受暂时的缺口
 
