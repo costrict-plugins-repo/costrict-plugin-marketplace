@@ -433,6 +433,25 @@ def plugin_size_bytes(bare_dir: Path) -> int:
 
 def process_plugin(entry: dict, ctx: BuildContext) -> dict | None:
     plugin_id = entry["id"]
+    # external_mirror entries (e.g. cos-graph/graphify) are published as a
+    # FULL-REPO mirror of their whole upstream branch by a dedicated git-mirror
+    # job — the plugin's substance lives OUTSIDE its .claude-plugin subdir, so
+    # extracting here (find_plugin_root would rglob to the thin plugin subdir)
+    # would publish an incomplete repo and CLOBBER the full mirror. Skip building
+    # a bare repo entirely: with no repos/plugins/<id>.git in the bundle, publish.sh
+    # (which discovers repos from that dir) never touches the mirrored repo. Still
+    # return metadata so the entry stays in marketplace.json / manifest.json — its
+    # source.url ({{BASE_URL}}/<id>.git) already resolves to the mirrored repo.
+    if entry.get("external_mirror") is True:
+        LOG.info("external mirror (bare-repo build skipped): %s", plugin_id)
+        return {
+            "id": plugin_id,
+            "name": entry.get("name", plugin_id),
+            "version": entry.get("version") or "0.0.0",
+            "size_bytes": 0,
+            "category": entry.get("category", "other"),
+            "description": entry.get("description", ""),
+        }
     bare = ctx.bundle_root / "repos" / "plugins" / f"{plugin_id}.git"
     # Resume: if a bare repo with the expected single commit already exists
     # from a prior run, reuse it. Saves time on restart after partial builds.
