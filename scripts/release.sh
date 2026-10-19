@@ -43,6 +43,19 @@ done
 [[ -f "$SUMMARY" ]] || { echo "ERROR: build summary not found at $SUMMARY" >&2; exit 2; }
 [[ -f "$MANIFEST" ]] || { echo "ERROR: manifest not found at $MANIFEST" >&2; exit 2; }
 
+# GitHub rejects release assets >= 2 GiB with a 422 *after* creating the release.
+# Fail before touching the release; warn early so growth is noticed in time.
+ASSET_LIMIT=2147483648
+ASSET_WARN=1610612736
+BUNDLE_BYTES=$(wc -c < "$BUNDLE" | tr -d ' ')
+if (( BUNDLE_BYTES >= ASSET_LIMIT )); then
+  echo "ERROR: bundle is $BUNDLE_BYTES bytes; GitHub release assets must be < $ASSET_LIMIT (2 GiB)." >&2
+  echo "       Check build-summary.json / the largest plugins in manifest.json before retrying." >&2
+  exit 4
+elif (( BUNDLE_BYTES >= ASSET_WARN )); then
+  echo "::warning::bundle is $BUNDLE_BYTES bytes, over 1.5 GiB; the release asset limit is 2 GiB"
+fi
+
 # 6.5 — refuse to overwrite an existing release.
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   echo "ERROR: release $TAG already exists on $REPO." >&2
@@ -86,6 +99,7 @@ print(f"- Successfully bundled: **{summary['included_count']}**")
 print(f"- Failed (fetch/prune/init errors): {len(summary['failed'])}")
 print(f"- Invalid (missing .claude-plugin/plugin.json after prune): {len(summary['invalid'])}")
 print(f"- Skipped (marketplace_verified=false): {summary['skipped_unverified']}")
+print(f"- Skipped (github-trending, decision=reject): {summary.get('skipped_rejected', 0)}")
 print()
 
 # Top 10 largest

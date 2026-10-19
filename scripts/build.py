@@ -80,6 +80,7 @@ class BuildContext:
     failures: list[dict] = field(default_factory=list)
     invalid: list[dict] = field(default_factory=list)
     skipped_unverified: int = 0
+    skipped_rejected: int = 0
     included: list[dict] = field(default_factory=list)
 
 
@@ -188,6 +189,26 @@ def filter_verified(entries: list[dict]) -> tuple[list[dict], int]:
     skipped = len(entries) - len(kept)
     LOG.info("verified-only mode: kept=%d skipped=%d", len(kept), skipped)
     return kept, skipped
+
+
+# Auto-discovered sources with no human curation. Only these drop entries the
+# catalog evaluator marked decision=reject; curated sources (claude-plugins-dev,
+# claude-plugins-official, ...) are kept because their rejects are mostly "low
+# coding relevance" for legitimate plugins (Anthropic knowledge-work, spotify,
+# planetscale). Mirrors everything-ai-coding's scoring_governor policy.
+STRICT_REJECT_SOURCES = frozenset({"github-trending"})
+
+
+def filter_rejected(entries: list[dict]) -> tuple[list[dict], int]:
+    """Drop decision=reject entries from auto-discovered sources."""
+    kept = [
+        e for e in entries
+        if not (e.get("source") in STRICT_REJECT_SOURCES and e.get("decision") == "reject")
+    ]
+    dropped = len(entries) - len(kept)
+    if dropped:
+        LOG.info("rejected (auto-discovered, decision=reject): dropped=%d", dropped)
+    return kept, dropped
 
 
 _TREE_RE = re.compile(
@@ -301,16 +322,24 @@ def cache_clone(source_url: str, cache_dir: Path, branch: str | None = None) -> 
 def find_plugin_root(clone_dir: Path, plugin_name: str, subdir_hint: str | None = None) -> Path | None:
     """Locate `.claude-plugin/plugin.json` within a cloned repo.
 
-    Tries (subdir_hint, root, plugins/<name>, <name>) in that order, then a
-    wide rglob fallback.
+    With a subdir_hint: tries (subdir_hint, plugins/<name>, <name>) only. A hint
+    means the producer named a specific directory; if it's gone upstream, falling
+    back to the repo root (often a marketplace repo with its own plugin.json) or
+    rglob silently ships the wrong content. That's how 30 deleted sickn33 bundles
+    each became a 51 MB whole-repo copy and pushed v0.24.0 past 2 GiB.
+
+    Without a hint: tries (root, plugins/<name>, <name>), then a wide rglob.
     """
-    candidates: list[Path] = []
+    named = [clone_dir / "plugins" / plugin_name, clone_dir / plugin_name]
     if subdir_hint:
-        candidates.append(clone_dir / subdir_hint)
-    candidates += [clone_dir, clone_dir / "plugins" / plugin_name, clone_dir / plugin_name]
+        candidates = [clone_dir / subdir_hint, *named]
+    else:
+        candidates = [clone_dir, *named]
     for c in candidates:
         if (c / ".claude-plugin" / "plugin.json").is_file():
             return c
+    if subdir_hint:
+        return None
     for p in clone_dir.rglob(".claude-plugin/plugin.json"):
         return p.parent.parent
     return None
@@ -591,6 +620,7 @@ def write_build_summary(ctx: BuildContext, source_count: int) -> Path:
         "failed": ctx.failures,
         "invalid": ctx.invalid,
         "skipped_unverified": ctx.skipped_unverified,
+        "skipped_rejected": ctx.skipped_rejected,
     }
     if ctx.catalog_bundle_sha:
         summary["catalog_bundle_sha"] = ctx.catalog_bundle_sha
@@ -796,6 +826,7 @@ def main(argv: list[str] | None = None) -> int:
 
     LOG.info("catalog entries: %d", len(entries))
     kept, skipped = filter_verified(entries)
+    kept, rejected = filter_rejected(kept)
     if args.limit:
         kept = kept[: args.limit]
         LOG.info("--limit %d applied; processing %d", args.limit, len(kept))
@@ -814,6 +845,7 @@ def main(argv: list[str] | None = None) -> int:
         github_org=args.github_org,
         publish=args.publish,
         skipped_unverified=skipped,
+        skipped_rejected=rejected,
     )
     ctx.bundle_root.mkdir(parents=True, exist_ok=True)
     ctx.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -849,11 +881,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
     LOG.info(
-        "build done: included=%d failed=%d invalid=%d skipped_unverified=%d",
+        "build done: included=%d failed=%d invalid=%d skipped_unverified=%d skipped_rejected=%d",
         len(ctx.included),
         len(ctx.failures),
         len(ctx.invalid),
         ctx.skipped_unverified,
+        ctx.skipped_rejected,
     )
 
     if not ctx.included:
