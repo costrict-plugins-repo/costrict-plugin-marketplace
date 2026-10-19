@@ -9,6 +9,7 @@ entry's `source_ref`, which can contain slashes) overrides the URL-parsed one.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -162,9 +163,9 @@ def test_cache_key_no_collision_for_sanitized_refs(tmp_path, captured_clone):
 # find_plugin_root — a stale subdir hint must not fall back to the repo root
 # --------------------------------------------------------------------------- #
 
-def _plugin_dir(path: Path) -> Path:
+def _plugin_dir(path: Path, name: str | None = None) -> Path:
     (path / ".claude-plugin").mkdir(parents=True)
-    (path / ".claude-plugin" / "plugin.json").write_text("{}")
+    (path / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": name} if name else {}))
     return path
 
 
@@ -174,18 +175,30 @@ class TestFindPluginRoot:
         sub = _plugin_dir(tmp_path / "plugins" / "agentic-bundle-web-app")
         assert build.find_plugin_root(tmp_path, "x", "plugins/agentic-bundle-web-app") == sub
 
-    def test_stale_hint_does_not_fall_back_to_root(self, tmp_path):
-        # sickn33/agentic-awesome-skills: root carries its own plugin.json, the
-        # hinted bundle dir was deleted upstream -> must be invalid, not the whole repo.
-        _plugin_dir(tmp_path)
-        _plugin_dir(tmp_path / "plugins" / "agentic-bundle-web-app")
+    def test_stale_hint_rejects_root_of_another_plugin(self, tmp_path):
+        # sickn33/agentic-awesome-skills: root carries its own (different) plugin,
+        # the hinted bundle dir was deleted upstream -> invalid, not the whole repo.
+        _plugin_dir(tmp_path, "agentic-awesome-skills")
+        _plugin_dir(tmp_path / "plugins" / "agentic-bundle-web-app", "agentic-bundle-web-app")
         assert build.find_plugin_root(
             tmp_path, "agentic-bundle-gone", "plugins/agentic-bundle-gone"
         ) is None
 
-    def test_stale_hint_does_not_rglob(self, tmp_path):
-        _plugin_dir(tmp_path / "somewhere" / "else")
+    def test_stale_hint_accepts_root_with_matching_name(self, tmp_path):
+        # cospowers-*: catalog hint is "<name>-plugin" but the repo itself is the plugin.
+        _plugin_dir(tmp_path, "cospowers-requirements")
+        assert build.find_plugin_root(
+            tmp_path, "cospowers-requirements", "cospowers-requirements-plugin"
+        ) == tmp_path
+
+    def test_stale_hint_rglob_only_matching_name(self, tmp_path):
+        _plugin_dir(tmp_path / "plugins" / "a-first", "a-first")
         assert build.find_plugin_root(tmp_path, "gone", "plugins/gone") is None
+
+    def test_stale_hint_rglob_finds_moved_plugin_by_name(self, tmp_path):
+        _plugin_dir(tmp_path / "plugins" / "a-first", "a-first")
+        moved = _plugin_dir(tmp_path / "plugins" / "community" / "zai-cli", "zai-cli")
+        assert build.find_plugin_root(tmp_path, "zai-cli", "plugins/tools/zai-cli") == moved
 
     def test_stale_hint_falls_back_to_named_dir(self, tmp_path):
         named = _plugin_dir(tmp_path / "plugins" / "foo")

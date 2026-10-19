@@ -319,29 +319,46 @@ def cache_clone(source_url: str, cache_dir: Path, branch: str | None = None) -> 
         return dest
 
 
+def _plugin_json_name(plugin_dir: Path) -> str | None:
+    try:
+        data = json.loads((plugin_dir / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data.get("name") if isinstance(data, dict) else None
+
+
 def find_plugin_root(clone_dir: Path, plugin_name: str, subdir_hint: str | None = None) -> Path | None:
     """Locate `.claude-plugin/plugin.json` within a cloned repo.
 
-    With a subdir_hint: tries (subdir_hint, plugins/<name>, <name>) only. A hint
-    means the producer named a specific directory; if it's gone upstream, falling
-    back to the repo root (often a marketplace repo with its own plugin.json) or
-    rglob silently ships the wrong content. That's how 30 deleted sickn33 bundles
-    each became a 51 MB whole-repo copy and pushed v0.24.0 past 2 GiB.
-
     Without a hint: tries (root, plugins/<name>, <name>), then a wide rglob.
+
+    With a hint that still exists: the hint. With a stale hint: plugins/<name>
+    and <name> by directory name, then the root and an rglob -- but those two
+    only when their plugin.json `name` equals plugin_name. The root is right
+    for single-plugin repos whose plugin moved to the root (cospowers-*), and
+    wrong for marketplace repos whose root plugin.json is a different plugin:
+    accepting it blindly made 30 deleted sickn33 bundles each ship the whole
+    51 MB repo (v0.24.0 hit 2.59 GB), while rejecting it outright dropped the
+    first-party cospowers plugins from the marketplace.
     """
     named = [clone_dir / "plugins" / plugin_name, clone_dir / plugin_name]
-    if subdir_hint:
-        candidates = [clone_dir / subdir_hint, *named]
-    else:
-        candidates = [clone_dir, *named]
-    for c in candidates:
-        if (c / ".claude-plugin" / "plugin.json").is_file():
-            return c
-    if subdir_hint:
+    has_manifest = lambda d: (d / ".claude-plugin" / "plugin.json").is_file()  # noqa: E731
+    if not subdir_hint:
+        for c in [clone_dir, *named]:
+            if has_manifest(c):
+                return c
+        for p in clone_dir.rglob(".claude-plugin/plugin.json"):
+            return p.parent.parent
         return None
-    for p in clone_dir.rglob(".claude-plugin/plugin.json"):
-        return p.parent.parent
+
+    for c in [clone_dir / subdir_hint, *named]:
+        if has_manifest(c):
+            return c
+    if _plugin_json_name(clone_dir) == plugin_name:
+        return clone_dir
+    for p in sorted(clone_dir.rglob(".claude-plugin/plugin.json")):
+        if _plugin_json_name(p.parent.parent) == plugin_name:
+            return p.parent.parent
     return None
 
 
